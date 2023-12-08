@@ -38,7 +38,7 @@ lex_source :: proc(source: string) {
 
     next_location := Location {
         line   = 1,
-        column = 1,
+        column = 0,
     }
 
     processed: for c, i in source {
