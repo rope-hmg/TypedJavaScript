@@ -13,6 +13,8 @@ Token_Kind :: enum {
     Boolean,
 
     // Keywords
+    Import,
+    Export,
     If,
     Else,
     For,
@@ -58,6 +60,7 @@ Token_Kind :: enum {
     Colon,                      // :
     Double_Colon,               // ::
     Semicolon,                  // ;
+    Dollar,                     // $
     Comma,                      // ,
     Full_Stop,                  // .
     Equals,                     // =
@@ -81,6 +84,7 @@ Token_Kind :: enum {
 
 Token_Value :: union {
     f64,
+    i64,
     bool,
 }
 

@@ -1,15 +1,12 @@
 package lexer
 
+import "core:strconv"
+
 // -----------------------------------------------------------------------------
 // Lexer
 
-// Need a better name for this
-Result :: enum {
-    Processed,
-    Unprocessed,
-}
-
-Mode :: enum {
+@private
+Mode :: union {
     Normal,
     Identifier,
     Number,
@@ -17,24 +14,36 @@ Mode :: enum {
     Operator,
 }
 
-Lex_State :: union {
-    Normal_Lex_State,
-    Identifier_Lex_State,
-    Number_Lex_State,
-    String_Lex_State,
-    Operator_Lex_State,
+// Need a better name for this
+@private
+Result :: enum {
+    Processed,
+    Unprocessed,
+}
+
+@private
+Lex_State :: struct {
+    source:   string,
+    mode:     Mode,
+    result:   Result,
+    index:    int,
+    location: Location
 }
 
 lex_source :: proc(source: string) {
-    current_location: Location
-       next_location: Location
+    lex_state := Lex_State {
+        source = source,
+        mode   = Normal {},
+    }
 
-    mode := Mode.Normal
-
-    lex_state: Lex_State
+    next_location := Location {
+        line   = 1,
+        column = 1,
+    }
 
     processed: for c, i in source {
-        current_location = next_location
+        lex_state.location = next_location
+        lex_state.index    = i
         
         next_location.column += 1
 
@@ -44,17 +53,17 @@ lex_source :: proc(source: string) {
         }
 
         unprocessed: for {
-            result := Result.Processed
+            lex_state.result = Result.Processed
 
-            switch mode {
-                case .Normal:     lex_normal    (&lex_state, c, &mode, &result)
-                case .Identifier: lex_identifier(&lex_state, c, &mode, &result)
-                case .Number:     lex_number    (&lex_state, c, &mode, &result)
-                case .String:     lex_string    (&lex_state, c, &mode, &result)
-                case .Operator:   lex_operator  (&lex_state, c, &mode, &result)
+            switch mode in &lex_state.mode {
+                case Normal:     lex_normal    (c, &lex_state, &mode)
+                case Identifier: lex_identifier(c, &lex_state, &mode)
+                case Number:     lex_number    (c, &lex_state, &mode)
+                case String:     lex_string    (c, &lex_state, &mode)
+                case Operator:   lex_operator  (c, &lex_state, &mode)
             }
 
-            switch result {
+            switch lex_state.result {
                 case .Processed:   continue processed
                 case .Unprocessed: continue unprocessed
             }
@@ -65,40 +74,40 @@ lex_source :: proc(source: string) {
 // -----------------------------------------------------------------------------
 // Normal
 
-Normal_Lex_State :: struct {
-    
+@private
+Normal :: struct {}
+
+@private
+set_normal_mode :: proc(state: ^Lex_State) {
+    state.mode = Normal {}
 }
 
+@private
 lex_normal :: proc(
-    state:  ^Lex_State,
     c:      rune,
-    mode:   ^Mode,
-    result: ^Result,
+    state:  ^Lex_State,
+    mode:   ^Normal,
 ) {
     switch {
         case is_white_space(c):
             // Skip white space characters
 
         case is_identifier_start(c):
-            mode^   = .Identifier
-            result^ = .Unprocessed
+            set_identifier_mode(state)
 
         case is_numeric_start(c):
-            mode^   = .Number
-            result^ = .Unprocessed
+            set_number_mode(state, c)
 
-        case is_single_quote(c):
-            mode^   = .String
-
-        case is_double_quote(c):
-            mode^   = .String
+        case is_string_delimiter(c):
+            set_string_mode(state, c)
 
         case:
-            mode^   = .Operator
-            result^ = .Unprocessed
+            set_operator_mode(state)
+            state.result = .Unprocessed
     }
 }
 
+@private
 is_white_space :: #force_inline proc(c: rune) -> bool {
     return c <= ' '
 }
@@ -106,116 +115,308 @@ is_white_space :: #force_inline proc(c: rune) -> bool {
 // -----------------------------------------------------------------------------
 // Identifier
 
-Identifier_Lex_State :: struct {
-    
+@private
+Identifier :: struct {
+    first_index: int,
 }
 
+@private
+set_identifier_mode :: proc(state: ^Lex_State) {
+    state.mode = Identifier {
+        first_index = state.index,
+    }
+}
+
+@private
 lex_identifier :: proc(
-    state:  ^Lex_State,
-    c:      rune,
-    mode:   ^Mode,
-    result: ^Result,
+          c:     rune,
+          state: ^Lex_State,
+    using mode:  ^Identifier,
 ) {
-    if is_identifier_continue(c) {
-        result^ = .Unprocessed
+    if !is_identifier_continue(c) {
+        lexeme := state.source[mode.first_index:state.index]
+        found  := false
+
+        kind:  Token_Kind
+        value: Token_Value
+
+        for i := 0;
+            i < len(IDENTIFIERS) && !found;
+            i += 1
+        {
+            identifier := IDENTIFIERS[i]
+
+            found = identifier.lexeme == lexeme
+            kind  = identifier.kind
+            value = identifier.value
+        }
+
+        // This should stop anyone moving the last entry in IDENTIFIERS array.
+        if !found do assert(kind == .Identifier)
+
+        token := Token {
+            kind     = kind,
+            value    = value,
+            location = state.location,
+            span     = Span { first_index, state.index }, 
+        }
+
+        set_normal_mode(state)
+        state.result = .Unprocessed
     }
 }
 
 is_identifier_start :: #force_inline proc(c: rune) -> bool {
     return c >= 'a' && c <= 'z' ||
-           c >= 'A' && c <= 'Z' ||
-           c == '_'             ||
-           c == '$'
+           c >= 'A' && c <= 'Z'
 }
 
 is_identifier_continue :: #force_inline proc(c: rune) -> bool {
     return is_identifier_start(c) ||
-           is_numeric_start(c)
+           is_numeric_start(c)    ||
+           c == '_'               ||
+           c == '$'
+}
+
+@private
+Identifier_Map_Entry :: struct {
+    lexeme: string,
+    kind:   Token_Kind,
+    value:  Token_Value,
+}
+
+@private
+Identifier_Map :: []Identifier_Map_Entry
+
+@private
+IDENTIFIERS := Identifier_Map {
+    { "import", .Import,    nil   },
+    { "export", .Export,    nil   },
+    { "if",     .If,        nil   },
+    { "else",   .Else,      nil   },
+    { "for",    .For,       nil   },
+    { "while",  .While,     nil   },
+    { "type",   .Type,      nil   },
+    { "object", .Object,    nil   },
+    { "union",  .Union,     nil   },
+    { "enum",   .Enum,      nil   },
+    { "fn",     .Fn,        nil   },
+    { "self",   .Self,      nil   },
+    { "Self",   .Self_Type, nil   },
+    { "true",   .Boolean,   true  },
+    { "false",  .Boolean,   false },
+
+    // IMPORTANT: This must be the last entry in the map.
+    { "", .Identifier, nil },
 }
 
 // -----------------------------------------------------------------------------
 // Number
 
-Number_Lex_State :: struct {
-    
+@private
+Number :: struct {
+    first_index:         int,
+    integer_base:        int,
+    needs_clarification: bool,
+    is_float:            bool,
+    is_numeric_continue: proc(rune) -> bool,
 }
 
-lex_number :: proc(
-    state:  ^Lex_State,
-    c:      rune,
-    mode:   ^Mode,
-    result: ^Result,
-) {
-    if is_numeric_continue(c) {
-        result^ = .Unprocessed
+@private
+set_number_mode :: proc(state: ^Lex_State, c: rune) {
+    state.mode = Number {
+        first_index         = state.index,
+        needs_clarification = c == '0',
     }
 }
 
+@private
+lex_number :: proc(
+          c:     rune,
+          state: ^Lex_State,
+    using mode:  ^Number,
+) {
+    if  needs_clarification {
+        needs_clarification = false
+
+        switch c {
+            case 'b': {
+                is_numeric_continue = is_binary_continue
+                integer_base        = 2
+            }
+
+            case 'o': {
+                is_numeric_continue = is_octal_continue
+                integer_base        = 8
+            }
+
+            case 'x': {
+                is_numeric_continue = is_hexadecimal_continue
+                integer_base        = 16
+            }
+
+            case: {
+                is_numeric_continue = is_decimal_continue
+                integer_base        = 10
+
+            }
+        }
+
+        if is_numeric_continue != is_decimal_continue {
+            // We don't include the prefix in the lexeme.
+            first_index = state.index + 1
+        }
+    } else {
+        if c == '.' {
+            if is_float {
+                // TODO: Error
+            }
+
+            is_float = true
+        }
+
+        if !is_numeric_continue(c) {
+            kind: Token_Kind
+
+            if c == 'n' {
+                if is_float {
+                    // TODO: Error
+                }
+
+                kind = .Big_Integer
+            } else if is_float {
+                kind = .Float
+            } else {
+                kind = .Integer
+            }
+
+            lexeme := state.source[mode.first_index:state.index]
+
+            value: Token_Value
+            ok:    bool
+
+            #partial switch kind {
+                case .Integer:      value, ok = strconv.parse_i64(lexeme, integer_base)
+                case .Float:        value, ok = strconv.parse_f64(lexeme)
+                case .Big_Integer:  value, ok = 0, true // TODO: Support big integers
+            }
+
+            if !ok {
+                // TODO: Error
+            }
+
+            token := Token {
+                kind     = kind,
+                value    = value,
+                location = state.location,
+                span     = Span { first_index, state.index }, 
+            }
+
+            set_normal_mode(state)
+            state.result = .Unprocessed
+        }
+    }
+}
+
+@private
 is_numeric_start :: #force_inline proc(c: rune) -> bool {
     return c >= '0' && c <= '9'
 }
 
-is_numeric_continue :: #force_inline proc(c: rune) -> bool {
-    return is_numeric_start(c) ||
+@private
+is_binary_continue :: #force_inline proc(c: rune) -> bool {
+    return c == '0' || c == '1' ||
            c == '_'
+}
+
+@private
+is_octal_continue :: #force_inline proc(c: rune) -> bool {
+    return c >= '0' && c <= '7' ||
+           c == '_'
+}
+
+@private
+is_hexadecimal_continue :: #force_inline proc(c: rune) -> bool {
+    return c >= '0' && c <= '9' ||
+           c >= 'a' && c <= 'f' ||
+           c >= 'A' && c <= 'F' ||
+           c == '_'
+}
+
+@private
+is_decimal_continue :: #force_inline proc(c: rune) -> bool {
+    return c >= '0' && c <= '9' ||
+           c == '_'             ||
+           c == '.'
 }
 
 // -----------------------------------------------------------------------------
 // String
 
-String_Lex_State :: struct {
-    delimiter: rune,
+@private
+String :: struct {
+    delimiter:   rune,
+    first_index: int,
 }
 
-lex_string :: proc(
-    state:  ^Lex_State,
-    c:      rune,
-    mode:   ^Mode,
-    result: ^Result,
-) {
-    if is_single_quote(c) {
-        result^ = .Unprocessed
+@private
+set_string_mode :: proc(state: ^Lex_State, delimiter: rune) {
+    state.mode = String {
+        delimiter   = delimiter,
+        first_index = state.index,
     }
 }
 
-is_single_quote :: proc(c: rune) -> bool {
-    return c == '\''
+@private
+lex_string :: proc(
+          c:      rune,
+          state:  ^Lex_State,
+    using mode:   ^String,
+) {
+    if c == delimiter {
+        token := Token {
+            kind     = .String,
+            value    = nil,
+            location = state.location,
+            span     = Span { first_index, state.index }, 
+        }
+
+        set_normal_mode(state)
+    }
 }
 
-is_double_quote :: proc(c: rune) -> bool {
-    return c == '"'
+@private
+is_string_delimiter :: proc(c: rune) -> bool {
+    return c == '\'' ||
+           c == '"'  ||
+           c == '`'
 }
 
 // -----------------------------------------------------------------------------
 // Operators
 
-Operator_Lex_State :: struct {
-    search:  []Operator,
-    current: Token_Kind,
+@private
+Operator :: struct {
+    search:      Operator_Map,
+    current:     Token_Kind,
+    first_index: int,
 }
 
+@private
+set_operator_mode :: proc(state: ^Lex_State) {
+    state.mode = Operator {
+        search      = OPERATOR_MAP,
+        current     = .Invalid,
+        first_index = state.index,
+    }
+}
+
+@private
 lex_operator :: proc(
-    state:  ^Lex_State,
-    c:      rune,
-    mode:   ^Mode,
-    result: ^Result,
+          c:     rune,
+          state: ^Lex_State,
+    using mode:  ^Operator,
 ) {
-    state, ok := state.(Operator_Lex_State)
-
-    if !ok {
-        state = Operator_Lex_State {
-            search  = nil,
-            current = .Invalid,
-        }
-    }
-
-    using state
-
-    if search == nil {
-        search  = OPERATOR_MAP
-        current = .Invalid
-    }
-
     // Indicates whether or not the current character is part of a valid operator.
     found := false
 
@@ -238,25 +439,27 @@ lex_operator :: proc(
         token := Token {
             kind     = current,
             value    = nil,
-            location = first_character_location,
-            span     = Span { first_index, last_index }, 
+            location = state.location,
+            span     = Span { first_index, state.index }, 
         }
 
-        mode^   = .Normal
-        result^ = .Unprocessed
-        search  = nil
+        set_normal_mode(state)
+        state.result = .Unprocessed
     }
 }
 
 @private
-Operator :: struct {
+Operator_Map_Entry :: struct {
     kind: Token_Kind,
     char: rune,
-    next: []Operator,
+    next: Operator_Map,
 }
 
 @private
-OPERATOR_MAP := []Operator {
+Operator_Map :: []Operator_Map_Entry
+
+@private
+OPERATOR_MAP := Operator_Map {
     { .Plus,          '+', PLUS_MAP         },
     { .Minus,         '-', MINUS_MAP        },
     { .Asterisk,      '*', ASTERISK_MAP     },
@@ -270,6 +473,7 @@ OPERATOR_MAP := []Operator {
     { .Question,      '?', QUESTION_MAP     },
     { .Colon,         ':', COLON_MAP        },
     { .Semicolon,     ';', nil              },
+    { .Dollar,        '$', nil              },
     { .Comma,         ',', nil              },
     { .Full_Stop,     '.', nil              },
     { .Equals,        '=', EQUALS_MAP       },
@@ -284,113 +488,113 @@ OPERATOR_MAP := []Operator {
 }
 
 @private
-PLUS_MAP := []Operator {
+PLUS_MAP := Operator_Map {
     { .Plus_Equals, '=', nil },
 }
 
 @private
-MINUS_MAP := []Operator {
+MINUS_MAP := Operator_Map {
     { .Minus_Equals, '=', nil },
 }
 
 @private
-ASTERISK_MAP := []Operator {
+ASTERISK_MAP := Operator_Map {
     { .Asterisk_Equals, '=', nil },
     { .Double_Asterisk, '*', DOUBLE_ASTERISK_MAP },
 }
 
 @private
-DOUBLE_ASTERISK_MAP := []Operator {
+DOUBLE_ASTERISK_MAP := Operator_Map {
     { .Double_Asterisk_Equals, '=', nil },
 }
 
 @private
-SOLIDUS_MAP := []Operator {
+SOLIDUS_MAP := Operator_Map {
     { .Solidus_Equals, '=', nil },
 }
 
 @private
-PERCENT_MAP := []Operator {
+PERCENT_MAP := Operator_Map {
     { .Percent_Equals, '=', nil },
 }
 
 @private
-CARET_MAP := []Operator {
+CARET_MAP := Operator_Map {
     { .Caret_Equals, '=', nil },
 }
 
 @private
-AMPERSAND_MAP := []Operator {
+AMPERSAND_MAP := Operator_Map {
     { .Ampersand_Equals, '=', nil },
     { .Double_Ampersand, '&', DOUBLE_AMPERSAND_MAP },
 }
 
 @private
-DOUBLE_AMPERSAND_MAP := []Operator {
+DOUBLE_AMPERSAND_MAP := Operator_Map {
     { .Double_Ampersand_Equals, '=', nil },
 }
 
 @private
-PIPE_MAP := []Operator {
+PIPE_MAP := Operator_Map {
     { .Pipe_Equals, '=', nil },
     { .Pipe_Greater_Than, '>', nil },
     { .Double_Pipe, '|', DOUBLE_PIPE_MAP },
 }
 
 @private
-DOUBLE_PIPE_MAP := []Operator {
+DOUBLE_PIPE_MAP := Operator_Map {
     { .Double_Pipe_Equals, '=', nil },
 }
 
 @private
-TILDE_MAP := []Operator {
+TILDE_MAP := Operator_Map {
     { .Tilde_Equals, '=', nil },
 }
 
 @private
-EXCLAMATION_MAP := []Operator {
+EXCLAMATION_MAP := Operator_Map {
     { .Exclamation_Equals, '=', nil },
 }
 
 @private
-QUESTION_MAP := []Operator {
+QUESTION_MAP := Operator_Map {
     { .Question_Equals, '=', nil },
 }
 
 @private
-COLON_MAP := []Operator {
+COLON_MAP := Operator_Map {
     { .Double_Colon, ':', nil },
 }
 
 @private
-EQUALS_MAP := []Operator {
+EQUALS_MAP := Operator_Map {
     { .Double_Equals, '=', nil },
 }
 
 @private
-LESS_THAN_MAP := []Operator {
+LESS_THAN_MAP := Operator_Map {
     { .Less_Than_Equals, '=', LESS_THAN_EQUALS_MAP },
     { .Double_Less_Than, '<', DOUBLE_LESS_THAN_MAP },
 }
 
 @private
-LESS_THAN_EQUALS_MAP := []Operator {
+LESS_THAN_EQUALS_MAP := Operator_Map {
     { .Space_Ship, '>', nil },
 }
 
 @private
-DOUBLE_LESS_THAN_MAP := []Operator {
+DOUBLE_LESS_THAN_MAP := Operator_Map {
     { .Double_Less_Than_Equals, '=', nil },
 }
 
 @private
-GREATER_THAN_MAP := []Operator {
+GREATER_THAN_MAP := Operator_Map {
     { .Greater_Than_Equals, '=', nil },
     { .Double_Greater_Than, '>', DOUBLE_GREATER_THAN_MAP },
 }
 
 @private
-DOUBLE_GREATER_THAN_MAP := []Operator {
+DOUBLE_GREATER_THAN_MAP := Operator_Map {
     { .Double_Greater_Than_Equals, '=', nil },
 }
 
